@@ -9,3 +9,6 @@ __pycache__
 .env.testing
 .env.production
 
+dist
+build
+*.spec

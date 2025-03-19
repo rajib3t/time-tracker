@@ -8,20 +8,23 @@ import requests
 import os
 import time
 from datetime import timedelta
-
-
+from api.api_service import APIService
+from dotenv import load_dotenv
+load_dotenv()
 class DashboardWindow(QWidget):
     def __init__(self, stacked_widget):
         super().__init__()
         self.stacked_widget = stacked_widget
         self.user_data = None
         self.token = None
+        self.refresh_token = None
         
         # Session timer variables
         self.elapsed_time = 0
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_timer)
         self.is_running = False
+        self.is_paused = False
         
         # Screenshot timer variables
         self.screenshot_timer = QTimer()
@@ -29,6 +32,10 @@ class DashboardWindow(QWidget):
         self.screenshot_interval = 3 * 60 * 1000  # 3 minutes in milliseconds
         self.auto_screenshot_enabled = False
         
+        self.api = APIService()
+        # Register the token refresh callback
+        self.api.set_token_refresh_callback(self.refresh_token_callback)
+
         self.setup_ui()
         
     def setup_ui(self):
@@ -120,6 +127,12 @@ class DashboardWindow(QWidget):
         self.start_button.clicked.connect(self.start_timer)
         timer_buttons_layout.addWidget(self.start_button)
         
+        self.pause_button = QPushButton("Pause")
+        self.pause_button.setFixedWidth(100)
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self.pause_timer)
+        timer_buttons_layout.addWidget(self.pause_button)
+        
         self.end_button = QPushButton("End")
         self.end_button.setFixedWidth(100)
         self.end_button.setEnabled(False)
@@ -174,6 +187,10 @@ class DashboardWindow(QWidget):
     def set_user_data(self, data):
         self.user_data = data
         self.token = data.get("token")
+        self.refresh_token = data.get("refresh_token")  # Store refresh token
+        
+        # Update the API service with the tokens
+        self.api.set_auth_token(self.token, self.refresh_token, self.user_data)
         
         user_info = data.get("user", {})
         first_name = user_info.get("firstName", "User")
@@ -184,10 +201,62 @@ class DashboardWindow(QWidget):
         email = user_info.get("email", "N/A")
         self.user_info_label.setText(f"Email: {email}")
     
+    def refresh_token_callback(self, refresh_token):
+        """
+        Callback function for the APIService to refresh the token when it expires.
+        Returns a tuple of (new_access_token, new_refresh_token)
+        """
+        try:
+            # URL for token refresh
+            auth_url = f"{os.getenv('API_URL')}/auth/refresh-token" # Replace with your actual auth endpoint
+            
+            # Send the refresh token to get a new access token
+            response = requests.post(
+                auth_url,
+                json={"refreshToken": refresh_token}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                new_token = data['data']["accessToken"]
+                new_refresh_token = data['data']["refreshToken"]
+                
+                # Update local tokens
+                self.token = new_token
+                self.refresh_token = new_refresh_token
+                
+                # Update user data if provided in the response
+                if "user" in data:
+                    self.user_data["user"] = data["user"]
+                    
+                print("Token refreshed successfully")
+                return new_token, new_refresh_token
+            else:
+                print(f"Failed to refresh token. Status code: {response.status_code}")
+                # If refresh fails, user might need to log in again
+                self.handle_auth_failure()
+                return None, None
+                
+        except Exception as e:
+            print(f"Error refreshing token: {str(e)}")
+            self.handle_auth_failure()
+            return None, None
+    
+    def handle_auth_failure(self):
+        """Handle authentication failure by logging out and redirecting to login"""
+        # Show message to user
+        QMessageBox.warning(self, "Session Expired", 
+                           "Your session has expired. Please log in again.")
+        
+        # Logout user
+        self.logout()
+    
     def start_timer(self):
         self.is_running = True
+        self.is_paused = False
         self.timer.start(1000)  # Update every second
         self.start_button.setEnabled(False)
+        self.pause_button.setEnabled(True)
         self.end_button.setEnabled(True)
         
         # Start automatic screenshots when timer starts
@@ -196,47 +265,49 @@ class DashboardWindow(QWidget):
             # toggle_auto_screenshot will be called automatically due to the toggled signal
         
         # Send initial timer start event to API
-        self.send_timer_event_to_api("start")
+        self.api.post('timer/start', {})
         
         # Take initial screenshot
         self.take_screenshot()
-        
-    def send_timer_event_to_api(self, event_type):
-        """Send timer events to the API (start, update, end)"""
-        try:
-            # API endpoint (replace with your actual API endpoint)
-            url = "https//webhook.site/92c991e1-b716-4922-a4fd-498c76295211"
+    
+    def pause_timer(self):
+        if self.is_paused:
+            # Resume timer
+            self.is_paused = False
+            self.is_running = True
+            self.timer.start(1000)
+            self.pause_button.setText("Pause")
             
-            headers = {
-                "Authorization": f"Bearer {self.token}"
-            }
+            # Resume automatic screenshots
+            if self.auto_screenshot_enabled:
+                self.screenshot_timer.start(self.screenshot_interval)
+                
+            # Send timer resume event to API
+            self.api.post('timer/resume', {})
+        else:
+            # Pause timer
+            self.is_paused = True
+            self.is_running = False
+            self.timer.stop()
+            self.pause_button.setText("Resume")
             
-            # Prepare the data to send
-            data = {
-                'event': event_type,
-                'timestamp': time.time(),
-                'elapsed_time': self.elapsed_time,  # in seconds
-                'user_id': self.user_data.get('user', {}).get('id', '')
-            }
-            
-            # Send the request
-            response = requests.post(url, headers=headers, json=data)
-            
-            if response.status_code == 200:
-                print(f"Timer {event_type} event sent successfully")
-            else:
-                print(f"Failed to send timer {event_type} event. Status code: {response.status_code}")
-                    
-        except Exception as e:
-            print(f"Error sending timer event to API: {str(e)}")
-   
+            # Pause automatic screenshots
+            if self.auto_screenshot_enabled:
+                self.screenshot_timer.stop()
+                
+            # Send timer pause event to API
+            self.api.post('timer/pause', {})
+    
     def end_timer(self):
         # Send final timer data before stopping
-        self.send_timer_event_to_api("end")
+        self.api.post('timer/end', {})
         
         self.is_running = False
+        self.is_paused = False
         self.timer.stop()
         self.start_button.setEnabled(True)
+        self.pause_button.setEnabled(False)
+        self.pause_button.setText("Pause")
         self.end_button.setEnabled(False)
         
         # Disable automatic screenshots when timer ends
@@ -261,14 +332,15 @@ class DashboardWindow(QWidget):
         
         # Send periodic updates to API (e.g., every minute)
         if self.elapsed_time % 60 == 0:
-            self.send_timer_event_to_api("update")
+            self.api.post('timer/update', {})
     
     def toggle_auto_screenshot(self, checked):
         self.auto_screenshot_enabled = checked
         
         if checked:
-            # Start the screenshot timer
-            self.screenshot_timer.start(self.screenshot_interval)
+            # Only start the screenshot timer if the main timer is running and not paused
+            if self.is_running and not self.is_paused:
+                self.screenshot_timer.start(self.screenshot_interval)
             self.screenshot_status_label.setText("Automatic screenshots: Enabled (every 3 minutes)")
             
             # Calculate time until next screenshot
@@ -309,13 +381,6 @@ class DashboardWindow(QWidget):
     
     def send_screenshot_to_api(self, screenshot_path):
         try:
-            # API endpoint (replace with your actual API endpoint)
-            url = "http://localhost:3000/screenshot/upload"
-            
-            headers = {
-                "Authorization": f"Bearer {self.token}"
-            }
-            
             # Prepare the file for upload
             with open(screenshot_path, 'rb') as file:
                 files = {'screenshot': file}
@@ -327,13 +392,15 @@ class DashboardWindow(QWidget):
                     'auto_generated': self.sender() == self.screenshot_timer
                 }
                 
-                # Send the request
-                response = requests.post(url, headers=headers, files=files, data=data)
+                # Send the request using the API service
+                response = self.api.post('screenshot/upload', data=data, files=files)
                 
-                if response.status_code == 200:
-                    print(f"Screenshot uploaded successfully: {screenshot_path}")
-                else:
-                    print(f"Failed to upload screenshot. Status code: {response.status_code}")
+                # Check if the response is None (which happens when the request fails)
+                if response is None:
+                    print("Failed to upload screenshot. No response received.")
+                    return
+                    
+                print(f"Screenshot uploaded successfully: {screenshot_path}")
                     
         except Exception as e:
             print(f"Error sending screenshot to API: {str(e)}")
@@ -348,7 +415,12 @@ class DashboardWindow(QWidget):
             self.auto_screenshot_enabled = False
             self.auto_screenshot_checkbox.setChecked(False)
         
+        # Clear API service auth token
+        self.api.clear_auth_token()
+        
         self.user_data = None
         self.token = None
+        self.refresh_token = None
+        
         QMessageBox.information(self, "Logged Out", "You have been logged out successfully.")
         self.stacked_widget.setCurrentIndex(0)  # Switch to login page

@@ -5,8 +5,8 @@ from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont, QIcon
 import requests
 import json
-# Base URL for API requests
-API_BASE_URL = "http://localhost:3000/"
+
+from api.api_service import APIService
 class LoginWindow(QWidget):
     def __init__(self, stacked_widget):
         super().__init__()
@@ -76,16 +76,17 @@ class LoginWindow(QWidget):
     def login(self):
         username = self.username_input.text()
         password = self.password_input.text()
-        
+        api = APIService()
         if not username or not password:
             QMessageBox.warning(self, "Login Error", "Please enter both username and password.")
             return
         
         try:
-            response = requests.post(f"{API_BASE_URL}/auth/login", json={
+            request_data = {
                 "email": username,
                 "password": password
-            })
+            }
+            response = api._make_request('POST', "auth/login", request_data)
             
             data = response.json()
             
@@ -93,7 +94,8 @@ class LoginWindow(QWidget):
                 # Store token and user data in app
                 user_data = {
                     "user": data["data"]["user"],
-                    "token": data["data"]["accessToken"]  # Changed from 'token' to 'accessToken'
+                    "token": data["data"]["accessToken"],  # Changed from 'token' to 'accessToken'
+                    "refresh_token":data['data']['refreshToken']
                 }
                 self.stacked_widget.dashboard.set_user_data(user_data)
                 QMessageBox.information(self, "Success", "Login successful!")
